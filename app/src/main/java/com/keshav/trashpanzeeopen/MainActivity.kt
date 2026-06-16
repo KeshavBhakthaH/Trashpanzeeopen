@@ -25,18 +25,36 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Mail
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.outlined.AlternateEmail
+import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -66,6 +84,11 @@ import org.maplibre.android.location.modes.RenderMode
 import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.clip
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Check
 
 class MainActivity : ComponentActivity() {
 
@@ -115,7 +138,9 @@ class MainActivity : ComponentActivity() {
                         latitude = randomLat,
                         longitude = randomLng,
                         status = if (random.nextBoolean()) "Empty" else "Full",
-                        contributors = mockContributors
+                        contributors = mockContributors,
+                        upvotes = random.nextInt(20),
+                        downvotes = random.nextInt(8)
                     )
                 )
             }
@@ -151,230 +176,496 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             } else {
-                var currentScreen by remember { mutableStateOf("MAP") }
+                var currentScreen by remember { mutableStateOf("GLOBAL_MAP") }
                 var isScannerOpen by remember { mutableStateOf(false) }
+                var scannerTargetCanId by remember { mutableStateOf<String?>(null) }
                 var selectedCan by remember { mutableStateOf<TrashCan?>(null) }
                 val sheetState = rememberModalBottomSheetState()
 
                 val myActiveUserName = currentUserName!!
 
-                if (currentScreen == "PROFILE") {
-                    UserProfileScreen(
-                        userName = myActiveUserName,
-                        cansList = trashCans,
-                        onBackClicked = { currentScreen = "MAP" }
-                    )
-                } else {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (isScannerOpen) {
-                            CameraScannerOverlay(
-                                fusedLocationClient = fusedLocationClient,
-                                onCloseScanner = { isScannerOpen = false },
-                                onTrashCanLogged = { lat, lng ->
-                                    val existingCanIndex = trashCans.indexOfFirst { existing ->
-                                        val results = FloatArray(1)
-                                        Location.distanceBetween(lat, lng, existing.latitude, existing.longitude, results)
-                                        results[0] < 20f
-                                    }
-
-                                    if (existingCanIndex != -1) {
-                                        val existingCan = trashCans[existingCanIndex]
-                                        if (!existingCan.contributors.contains(myActiveUserName)) {
-                                            val updatedContributors = existingCan.contributors.toMutableList()
-                                            updatedContributors.add(myActiveUserName)
-                                            trashCans[existingCanIndex] = existingCan.copy(contributors = updatedContributors)
-                                            Toast.makeText(this@MainActivity, "You verified an existing can!", Toast.LENGTH_SHORT).show()
+                // ── Screen Router ───────────────────────────────
+                when (currentScreen) {
+                    "PROFILE" -> {
+                        val myTotalContributions = trashCans.count { it.contributors.contains(myActiveUserName) }
+                        UserProfileScreen(
+                            userName = myActiveUserName,
+                            totalContributions = myTotalContributions,
+                            onBackClicked = { currentScreen = "GLOBAL_MAP" }
+                        )
+                    }
+                    "MY_LOCATIONS" -> {
+                        MyTrashLocationsScreen(onBackClicked = { currentScreen = "GLOBAL_MAP" })
+                    }
+                    "LEADERBOARD" -> {
+                        LeaderboardScreen(onBackClicked = { currentScreen = "GLOBAL_MAP" })
+                    }
+                    "MESSAGES" -> {
+                        MessagesScreen(onBackClicked = { currentScreen = "GLOBAL_MAP" })
+                    }
+                    else -> {
+                        // ── GLOBAL_MAP (Home) ───────────────────
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (isScannerOpen) {
+                                CameraScannerOverlay(
+                                    fusedLocationClient = fusedLocationClient,
+                                    onCloseScanner = { isScannerOpen = false },
+                                    onTrashCanLogged = { lat, lng, status ->
+                                        if (scannerTargetCanId != null) {
+                                            // Update existing can explicitly
+                                            val index = trashCans.indexOfFirst { it.id == scannerTargetCanId }
+                                            if (index != -1) {
+                                                trashCans[index] = trashCans[index].copy(status = status)
+                                            }
                                         } else {
-                                            Toast.makeText(this@MainActivity, "You already mapped this can!", Toast.LENGTH_SHORT).show()
+                                            // Add new can or verify close existing
+                                            val existingCanIndex = trashCans.indexOfFirst { existing ->
+                                                val results = FloatArray(1)
+                                                Location.distanceBetween(lat, lng, existing.latitude, existing.longitude, results)
+                                                results[0] < 20f
+                                            }
+
+                                            if (existingCanIndex != -1) {
+                                                val existingCan = trashCans[existingCanIndex]
+                                                val updatedContributors = if (!existingCan.contributors.contains(myActiveUserName)) {
+                                                    Toast.makeText(this@MainActivity, "You verified an existing can!", Toast.LENGTH_SHORT).show()
+                                                    existingCan.contributors + myActiveUserName
+                                                } else {
+                                                    Toast.makeText(this@MainActivity, "You updated this can!", Toast.LENGTH_SHORT).show()
+                                                    existingCan.contributors
+                                                }
+                                                trashCans[existingCanIndex] = existingCan.copy(status = status, contributors = updatedContributors)
+                                            } else {
+                                                val newCan = TrashCan(
+                                                    id = UUID.randomUUID().toString(),
+                                                    latitude = lat,
+                                                    longitude = lng,
+                                                    status = status,
+                                                    contributors = listOf(myActiveUserName)
+                                                )
+                                                trashCans.add(newCan)
+                                            }
                                         }
-                                    } else {
-                                        val newCan = TrashCan(
-                                            id = UUID.randomUUID().toString(),
-                                            latitude = lat,
-                                            longitude = lng,
-                                            status = "Empty",
-                                            contributors = listOf(myActiveUserName)
-                                        )
-                                        trashCans.add(newCan)
+
+                                        pinStorage.saveCans(trashCans)
+                                        isScannerOpen = false
+                                        scannerTargetCanId = null
                                     }
+                                )
+                            } else {
+                                SnapchatTrashMap(
+                                    cans = trashCans.toList(),
+                                    selectedCanId = selectedCan?.id,
+                                    onCanClicked = { canId ->
+                                        selectedCan = trashCans.find { it.id == canId }
+                                    }
+                                )
 
-                                    pinStorage.saveCans(trashCans)
-                                    isScannerOpen = false
-                                }
-                            )
-                        } else {
-                            SnapchatTrashMap(
-                                cans = trashCans.toList(),
-                                selectedCanId = selectedCan?.id,
-                                onCanClicked = { canId ->
-                                    selectedCan = trashCans.find { it.id == canId }
-                                }
-                            )
-
-                            // 🚀 Top Navigation Overlays
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 48.dp, start = 16.dp, end = 16.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                IconButton(
-                                    onClick = { currentScreen = "PROFILE" },
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .background(Color.White, CircleShape)
-                                ) {
-                                    Icon(Icons.Default.Person, contentDescription = "Profile", tint = Color.Black)
-                                }
-
-                                IconButton(
-                                    onClick = { /* Search Overlay */ },
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .background(Color.White, CircleShape)
-                                ) {
-                                    Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.Black)
-                                }
-                            }
-
-                            // 🚀 Bottom Navigation Bar Surface (Matches Layout Blueprint)
-                            Column(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .fillMaxWidth()
-                            ) {
-                                Surface(
+                                // ── Top Bar: Profile (left) + Messages (right) ──
+                                Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(100.dp),
-                                    color = Color(0xFFF8F8F8)
+                                        .height(140.dp)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)
+                                            )
+                                        )
                                 ) {
                                     Row(
                                         modifier = Modifier
-                                            .fillMaxSize()
-                                            .padding(horizontal = 32.dp, vertical = 16.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
+                                            .fillMaxWidth()
+                                            .padding(top = 48.dp, start = 16.dp, end = 16.dp),
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Explore,
-                                            contentDescription = "Explore",
-                                            tint = Color.Black,
-                                            modifier = Modifier.size(28.dp)
-                                        )
-
-                                        Box(
+                                        IconButton(
+                                            onClick = { currentScreen = "PROFILE" },
                                             modifier = Modifier
-                                                .size(44.dp)
-                                                .background(Color.White, RoundedCornerShape(12.dp)),
-                                            contentAlignment = Alignment.Center
+                                                .size(48.dp)
+                                                .background(Color.Black, CircleShape)
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Default.LocationOn,
-                                                contentDescription = "Saved Locations",
-                                                tint = Color.LightGray,
-                                                modifier = Modifier.size(24.dp)
-                                            )
+                                            Icon(Icons.Outlined.Person, contentDescription = "Profile", tint = Color.White)
                                         }
 
-                                        Button(
-                                            onClick = { isScannerOpen = true },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2B2B2B)),
-                                            shape = RoundedCornerShape(24.dp),
-                                            modifier = Modifier.height(48.dp).width(120.dp)
+                                        IconButton(
+                                            onClick = { currentScreen = "MESSAGES" },
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .background(Color.Black, CircleShape)
                                         ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(
-                                                    Icons.Default.CameraAlt,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                                Spacer(Modifier.width(8.dp))
-                                                Text("trash", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                            }
+                                            Icon(Icons.Outlined.Mail, contentDescription = "Messages", tint = Color.White)
                                         }
                                     }
                                 }
-                            }
-                        }
 
-                        if (selectedCan != null) {
-                            ModalBottomSheet(
-                                onDismissRequest = { selectedCan = null },
-                                sheetState = sheetState
-                            ) {
-                                Column(
+                                // ── Bottom Navigation Bar ───────────────────────
+                                val navBarColor = Color(0xFF222222)
+                                val activeColor = Color.White
+                                val inactiveColor = Color.White
+
+                                Box(
                                     modifier = Modifier
+                                        .align(Alignment.BottomCenter)
                                         .fillMaxWidth()
-                                        .padding(16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Text("Public Trash Can", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                    Spacer(modifier = Modifier.height(8.dp))
+                                    // Gradient shadow above the nav bar
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(180.dp)
+                                            .align(Alignment.BottomCenter)
+                                            .background(
+                                                Brush.verticalGradient(
+                                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                                                )
+                                            )
+                                    )
 
-                                    val contributorString = selectedCan!!.contributors.joinToString(", ")
-                                    Text("Mapped by: $contributorString", fontSize = 14.sp, color = Color.Gray, fontWeight = FontWeight.Medium)
-                                    Spacer(modifier = Modifier.height(16.dp))
-
-                                    Text("Status: ${selectedCan!!.status}", fontSize = 18.sp, color = if (selectedCan!!.status == "Full") Color(0xFFE91E63) else Color(0xFF4CAF50), fontWeight = FontWeight.SemiBold)
-
-                                    Spacer(modifier = Modifier.height(24.dp))
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceEvenly
+                                    // Flat bottom navigation bar
+                                    Surface(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
+                                            .height(60.dp),
+                                        color = navBarColor
                                     ) {
-                                        Button(
-                                            onClick = {
-                                                updateCanStatus(selectedCan!!.id, "Empty")
-                                                selectedCan = null
-                                            },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                                        Row(
+                                            modifier = Modifier.fillMaxSize(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceEvenly
                                         ) {
-                                            Text("Mark Empty")
-                                        }
+                                            // Tab 1: My Trash Locations
+                                            IconButton(
+                                                onClick = { currentScreen = "MY_LOCATIONS" }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.AlternateEmail,
+                                                    contentDescription = "My Trash Locations",
+                                                    tint = inactiveColor,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                            }
 
-                                        Button(
-                                            onClick = {
-                                                updateCanStatus(selectedCan!!.id, "Full")
-                                                selectedCan = null
-                                            },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE91E63))
-                                        ) {
-                                            Text("Report Full")
+                                            // Tab 2: Global Map (Active)
+                                            Box(
+                                                modifier = Modifier
+                                                    .clickable(
+                                                        indication = null,
+                                                        interactionSource = remember { MutableInteractionSource() }
+                                                    ) { /* Already on Global Map */ }
+                                                    .padding(vertical = 12.dp, horizontal = 16.dp)
+                                                    .drawBehind {
+                                                        // Thin white underline indicator
+                                                        val underlineWidth = size.width * 0.7f
+                                                        val underlineHeight = 1.dp.toPx()
+                                                        drawRoundRect(
+                                                            color = activeColor,
+                                                            topLeft = Offset(
+                                                                (size.width - underlineWidth) / 2f,
+                                                                size.height - underlineHeight - 2.dp.toPx()
+                                                            ),
+                                                            size = Size(underlineWidth, underlineHeight),
+                                                            cornerRadius = CornerRadius(0.5.dp.toPx())
+                                                        )
+                                                    },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.LocationOn,
+                                                    contentDescription = "Global Map",
+                                                    tint = activeColor,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                            }
+
+                                            // Tab 3: Leaderboard
+                                            IconButton(
+                                                onClick = { currentScreen = "LEADERBOARD" }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.BarChart,
+                                                    contentDescription = "Leaderboard",
+                                                    tint = inactiveColor,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                            }
                                         }
                                     }
 
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    HorizontalDivider()
-                                    Spacer(modifier = Modifier.height(16.dp))
+                                    // Floating Camera Button (Overlaps the bottom nav bar)
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .padding(bottom = 100.dp) // Adjusted to match the floating overlap
+                                            .size(76.dp)
+                                            .background(Color(0xFF333333), CircleShape)
+                                            .clickable(
+                                                indication = null,
+                                                interactionSource = remember { MutableInteractionSource() }
+                                            ) { 
+                                                scannerTargetCanId = null
+                                                isScannerOpen = true 
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.PhotoCamera,
+                                            contentDescription = "Scan Trash Can",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                    }
+                                }
+                            }
 
-                                    if (selectedCan!!.contributors.contains(myActiveUserName)) {
-                                        Button(
-                                            onClick = {
-                                                val updatedContributors = selectedCan!!.contributors.toMutableList()
-                                                updatedContributors.remove(myActiveUserName)
+                            // ── Trash Can Detail Bottom Sheet ───────────────
+                            if (selectedCan != null) {
+                                ModalBottomSheet(
+                                    onDismissRequest = { selectedCan = null },
+                                    sheetState = sheetState,
+                                    containerColor = Color(0xFF1E1E1E),
+                                    contentColor = Color.White,
+                                    dragHandle = {
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(top = 12.dp)
+                                                .width(48.dp)
+                                                .height(4.dp)
+                                                .background(Color(0xFF333333), RoundedCornerShape(2.dp))
+                                        )
+                                    }
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Spacer(modifier = Modifier.height(16.dp))
 
-                                                if (updatedContributors.isEmpty()) {
-                                                    trashCans.removeAll { it.id == selectedCan!!.id }
-                                                } else {
-                                                    val index = trashCans.indexOfFirst { it.id == selectedCan!!.id }
-                                                    if (index != -1) {
-                                                        trashCans[index] = selectedCan!!.copy(contributors = updatedContributors)
+                                        // 1. Trash Can ID
+                                        val displayId = selectedCan!!.id.take(6).uppercase()
+                                        Text(
+                                            text = "TrashCan ID :$displayId",
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Color.White
+                                        )
+
+                                        Spacer(modifier = Modifier.height(4.dp))
+
+                                        // 2. Status with blip indicator
+                                        val statusColor = when(selectedCan!!.status) {
+                                            "Empty" -> Color(0xFF4CAF50)
+                                            "Low" -> Color(0xFF8BC34A)
+                                            "Half-filled" -> Color(0xFFFFEB3B)
+                                            "High" -> Color(0xFFFF9800)
+                                            else -> Color(0xFFE91E63)
+                                        }
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center
+                                        ) {
+                                            Text(
+                                                text = "status : ",
+                                                fontSize = 14.sp,
+                                                color = Color(0xFF9E9E9E)
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(14.dp)
+                                                    .background(statusColor, CircleShape)
+                                            )
+                                        }
+
+                                        Spacer(modifier = Modifier.height(48.dp))
+
+                                        // 3. Camera button — to update findings
+                                        Box(
+                                            modifier = Modifier
+                                                .size(76.dp)
+                                                .background(Color(0xFF333333), CircleShape)
+                                                .clickable(
+                                                    indication = null,
+                                                    interactionSource = remember { MutableInteractionSource() }
+                                                ) {
+                                                    scannerTargetCanId = selectedCan?.id
+                                                    selectedCan = null
+                                                    isScannerOpen = true
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Outlined.PhotoCamera,
+                                                contentDescription = "Update Findings",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(32.dp)
+                                            )
+                                        }
+
+                                        Spacer(modifier = Modifier.height(48.dp))
+
+                                        // 4. Bottom action band (Upvote / Warning / Downvote)
+                                        val canForVote = selectedCan!!
+                                        val hasUpvoted = canForVote.upvotedUsers?.contains(myActiveUserName) == true
+                                        val hasDownvoted = canForVote.downvotedUsers?.contains(myActiveUserName) == true
+
+                                        var showReportDialog by remember { mutableStateOf(false) }
+
+                                        val ctx = LocalContext.current
+                                        if (showReportDialog) {
+                                            AlertDialog(
+                                                onDismissRequest = { showReportDialog = false },
+                                                containerColor = Color(0xFF2B2B2B),
+                                                titleContentColor = Color.White,
+                                                textContentColor = Color.LightGray,
+                                                title = { Text("Report Trash Can") },
+                                                text = {
+                                                    Column {
+                                                        Text("What is the issue with this trash can location?")
+                                                        Spacer(modifier = Modifier.height(16.dp))
+                                                        val reports = listOf(
+                                                            "Trash can is missing/removed",
+                                                            "Location is inaccurate",
+                                                            "Trash can is damaged",
+                                                            "Not a public trash can"
+                                                        )
+                                                        reports.forEach { reportText ->
+                                                            TextButton(
+                                                                onClick = { 
+                                                                    showReportDialog = false
+                                                                    android.widget.Toast.makeText(ctx, "Report submitted: $reportText", android.widget.Toast.LENGTH_SHORT).show()
+                                                                },
+                                                                modifier = Modifier.fillMaxWidth()
+                                                            ) {
+                                                                Text(reportText, color = Color(0xFFE91E63), textAlign = androidx.compose.ui.text.style.TextAlign.Start, modifier = Modifier.fillMaxWidth())
+                                                            }
+                                                        }
                                                     }
+                                                },
+                                                confirmButton = {
+                                                    TextButton(onClick = { showReportDialog = false }) { Text("Cancel", color = Color.White) }
+                                                }
+                                            )
+                                        }
+
+                                        val hasVotedAny = hasUpvoted || hasDownvoted
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(Color(0xFF171717))
+                                                .padding(vertical = 16.dp, horizontal = 24.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                // Upvote button
+                                                val upText = if (hasVotedAny) "👍 ${canForVote.upvotes}" else "👍Upvote"
+                                                Button(
+                                                    onClick = {
+                                                        val index = trashCans.indexOfFirst { it.id == canForVote.id }
+                                                        if (index != -1) {
+                                                            val currentCan = trashCans[index]
+                                                            val upUsers = currentCan.upvotedUsers?.toMutableList() ?: mutableListOf()
+                                                            val downUsers = currentCan.downvotedUsers?.toMutableList() ?: mutableListOf()
+                                                            var newUpvotes = currentCan.upvotes
+                                                            var newDownvotes = currentCan.downvotes
+                                                            
+                                                            if (hasUpvoted) {
+                                                                upUsers.remove(myActiveUserName)
+                                                                newUpvotes--
+                                                            } else {
+                                                                upUsers.add(myActiveUserName)
+                                                                newUpvotes++
+                                                                if (hasDownvoted) {
+                                                                    downUsers.remove(myActiveUserName)
+                                                                    newDownvotes--
+                                                                }
+                                                            }
+                                                            val updated = currentCan.copy(
+                                                                upvotes = newUpvotes,
+                                                                downvotes = newDownvotes,
+                                                                upvotedUsers = upUsers,
+                                                                downvotedUsers = downUsers
+                                                            )
+                                                            trashCans[index] = updated
+                                                            selectedCan = updated
+                                                            pinStorage.saveCans(trashCans)
+                                                        }
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF385A4A)),
+                                                    shape = RoundedCornerShape(20.dp),
+                                                    modifier = Modifier.height(44.dp).weight(1f)
+                                                ) {
+                                                    Text(upText, color = Color.White, fontSize = 14.sp)
                                                 }
 
-                                                pinStorage.saveCans(trashCans)
-                                                selectedCan = null
-                                            },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
-                                        ) {
-                                            Text("Retract My Data", color = Color.White)
+                                                Spacer(modifier = Modifier.width(16.dp))
+
+                                                // Warning / Note indicator (Report Button)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(44.dp)
+                                                        .background(Color(0xFF59513B), CircleShape)
+                                                        .clickable { showReportDialog = true },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Outlined.WarningAmber,
+                                                        contentDescription = "Report Trash Can",
+                                                        tint = Color(0xFFDED5B5),
+                                                        modifier = Modifier.size(24.dp)
+                                                    )
+                                                }
+
+                                                Spacer(modifier = Modifier.width(16.dp))
+
+                                                // Downvote button
+                                                val downText = if (hasVotedAny) "👎 ${canForVote.downvotes}" else "👎Downvote"
+                                                Button(
+                                                    onClick = {
+                                                        val index = trashCans.indexOfFirst { it.id == canForVote.id }
+                                                        if (index != -1) {
+                                                            val currentCan = trashCans[index]
+                                                            val upUsers = currentCan.upvotedUsers?.toMutableList() ?: mutableListOf()
+                                                            val downUsers = currentCan.downvotedUsers?.toMutableList() ?: mutableListOf()
+                                                            var newUpvotes = currentCan.upvotes
+                                                            var newDownvotes = currentCan.downvotes
+                                                            
+                                                            if (hasDownvoted) {
+                                                                downUsers.remove(myActiveUserName)
+                                                                newDownvotes--
+                                                            } else {
+                                                                downUsers.add(myActiveUserName)
+                                                                newDownvotes++
+                                                                if (hasUpvoted) {
+                                                                    upUsers.remove(myActiveUserName)
+                                                                    newUpvotes--
+                                                                }
+                                                            }
+                                                            val updated = currentCan.copy(
+                                                                upvotes = newUpvotes,
+                                                                downvotes = newDownvotes,
+                                                                upvotedUsers = upUsers,
+                                                                downvotedUsers = downUsers
+                                                            )
+                                                            trashCans[index] = updated
+                                                            selectedCan = updated
+                                                            pinStorage.saveCans(trashCans)
+                                                        }
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5A3838)),
+                                                    shape = RoundedCornerShape(20.dp),
+                                                    modifier = Modifier.height(44.dp).weight(1f)
+                                                ) {
+                                                    Text(downText, color = Color.White, fontSize = 14.sp)
+                                                }
+                                            }
                                         }
-                                    } else {
-                                        Text("You haven't scanned this can yet.", fontSize = 12.sp, color = Color.LightGray)
+
+                                        Spacer(modifier = Modifier.height(32.dp))
                                     }
-                                    Spacer(modifier = Modifier.height(32.dp))
                                 }
                             }
                         }
@@ -395,65 +686,6 @@ class MainActivity : ComponentActivity() {
     // ==========================================
     // UI COMPONENTS
     // ==========================================
-
-    @Composable
-    fun UserProfileScreen(userName: String, cansList: List<TrashCan>, onBackClicked: () -> Unit) {
-        val myTotalContributions = cansList.count { it.contributors.contains(userName) }
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFFF5F5F5))
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-                TextButton(onClick = onBackClicked) {
-                    Text("← Back to Map", fontSize = 16.sp, color = Color(0xFF007AFF))
-                }
-            }
-
-            Spacer(modifier = Modifier.height(48.dp))
-
-            Box(
-                modifier = Modifier
-                    .size(100.dp)
-                    .background(Color(0xFF007AFF), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = userName.firstOrNull()?.uppercase() ?: "?",
-                    fontSize = 48.sp,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(userName, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("Citizen Mapper", fontSize = 16.sp, color = Color.Gray)
-
-            Spacer(modifier = Modifier.height(48.dp))
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(24.dp).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("Total Contributions", fontSize = 14.sp, color = Color.Gray, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(myTotalContributions.toString(), fontSize = 48.sp, fontWeight = FontWeight.Black, color = Color(0xFF4CAF50))
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Trash Cans Verified", fontSize = 14.sp, color = Color.Gray)
-                }
-            }
-        }
-    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
@@ -511,11 +743,13 @@ class MainActivity : ComponentActivity() {
                 map.clear()
                 val iconEmpty = getScaledPngIcon(context, R.drawable.ic_emptycan, 100, 100)
                 val iconFull = getScaledPngIcon(context, R.drawable.ic_fullcan, 100, 100)
+                val iconEmptyFocused = getScaledPngIcon(context, R.drawable.ic_emptycan, 140, 140)
+                val iconFullFocused = getScaledPngIcon(context, R.drawable.ic_fullcan, 140, 140)
 
                 cans.forEach { can ->
                     val isSelected = can.id == selectedCanId
                     val icon = if (isSelected) {
-                        createCalloutIcon(context, can.status)
+                        if (can.status == "Full") iconFullFocused else iconEmptyFocused
                     } else {
                         if (can.status == "Full") iconFull else iconEmpty
                     }
@@ -559,6 +793,7 @@ class MainActivity : ComponentActivity() {
 
                         maplibreMap.setOnMarkerClickListener { marker ->
                             marker.snippet?.let { canId -> onCanClicked(canId) }
+                            maplibreMap.animateCamera(CameraUpdateFactory.newLatLng(marker.position), 300)
                             true
                         }
                     }
@@ -574,65 +809,179 @@ class MainActivity : ComponentActivity() {
     fun CameraScannerOverlay(
         fusedLocationClient: FusedLocationProviderClient,
         onCloseScanner: () -> Unit,
-        onTrashCanLogged: (Double, Double) -> Unit
+        onTrashCanLogged: (Double, Double, String) -> Unit
     ) {
         var statusText by remember { mutableStateOf("Scan the Trash Can") }
         var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
+        var capturedBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+        var sliderValue by remember { mutableFloatStateOf(2f) }
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            CameraPreviewWindow(onImageCaptureReady = { capture -> imageCapture = capture })
+        if (capturedBitmap == null) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                CameraPreviewWindow(onImageCaptureReady = { capture -> imageCapture = capture })
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .background(Color.Black.copy(alpha = 0.7f))
-                    .padding(16.dp)
-            ) {
-                Text(text = statusText, color = Color.White, fontSize = 16.sp)
-            }
-
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(32.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Button(
-                    onClick = { onCloseScanner() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .padding(16.dp)
                 ) {
-                    Text("Cancel")
+                    Text(text = statusText, color = Color.White, fontSize = 16.sp)
                 }
 
-                Button(
-                    onClick = {
-                        val capture = imageCapture ?: return@Button
-                        statusText = "Syncing with Census..."
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(32.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Button(
+                        onClick = { onCloseScanner() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                    ) {
+                        Text("Cancel")
+                    }
 
-                        capture.takePicture(
-                            cameraExecutor,
-                            object : ImageCapture.OnImageCapturedCallback() {
-                                override fun onCaptureSuccess(imageProxy: ImageProxy) {
-                                    imageProxy.close()
+                    Button(
+                        onClick = {
+                            val capture = imageCapture ?: return@Button
+                            statusText = "Capturing..."
+
+                            capture.takePicture(
+                                cameraExecutor,
+                                object : ImageCapture.OnImageCapturedCallback() {
+                                    override fun onCaptureSuccess(imageProxy: ImageProxy) {
+                                        val buffer = imageProxy.planes[0].buffer
+                                        val bytes = ByteArray(buffer.remaining())
+                                        buffer.get(bytes)
+                                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                        imageProxy.close()
+                                        
+                                        // Update state on main thread
+                                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                            capturedBitmap = bitmap
+                                        }
+                                    }
+                                    override fun onError(exception: ImageCaptureException) {
+                                        Log.e("Trashpanzee", "Capture failed", exception)
+                                    }
+                                }
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF))
+                    ) {
+                        Text("Capture")
+                    }
+                }
+            }
+        } else {
+            // Review UI
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF1E1E1E))
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Spacer(modifier = Modifier.height(64.dp))
+                    
+                    // Clicked photo preview
+                    androidx.compose.foundation.Image(
+                        bitmap = capturedBitmap!!.asImageBitmap(),
+                        contentDescription = "Captured Trash Can",
+                        modifier = Modifier
+                            .fillMaxWidth(0.8f)
+                            .aspectRatio(3f/4f)
+                            .clip(RoundedCornerShape(24.dp)),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+                    
+                    Spacer(modifier = Modifier.height(48.dp))
+                    
+                    // Slider
+                    androidx.compose.material3.Slider(
+                        value = sliderValue,
+                        onValueChange = { sliderValue = it },
+                        valueRange = 0f..4f,
+                        steps = 3,
+                        modifier = Modifier.fillMaxWidth(0.8f),
+                        colors = androidx.compose.material3.SliderDefaults.colors(
+                            thumbColor = Color(0xFFFFC107),
+                            activeTrackColor = Color.White,
+                            inactiveTrackColor = Color.DarkGray
+                        )
+                    )
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(0.8f),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Empty", color = Color.LightGray, fontSize = 12.sp)
+                        Text("Half-filled", color = Color.LightGray, fontSize = 12.sp)
+                        Text("Full", color = Color.LightGray, fontSize = 12.sp)
+                    }
+                    
+                    Spacer(modifier = Modifier.weight(1f))
+                    
+                    // Bottom Buttons
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 64.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Back/Cancel
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .background(Color.Black, CircleShape)
+                                .clickable { capturedBitmap = null },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Retake", tint = Color.White)
+                        }
+                        
+                        // Retake
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .background(Color.Black, CircleShape)
+                                .clickable { capturedBitmap = null },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Retake", tint = Color.White, modifier = Modifier.size(32.dp))
+                        }
+                        
+                        // Submit
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .background(Color(0xFF4CAF50), CircleShape)
+                                .clickable {
+                                    val statusString = when(sliderValue.toInt()) {
+                                        0 -> "Empty"
+                                        1 -> "Low"
+                                        2 -> "Half-filled"
+                                        3 -> "High"
+                                        else -> "Full"
+                                    }
+                                    
                                     fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
                                         .addOnSuccessListener { location ->
                                             if (location != null) {
-                                                onTrashCanLogged(location.latitude, location.longitude)
-                                            } else {
-                                                statusText = "GPS warming up. Step outside!"
+                                                onTrashCanLogged(location.latitude, location.longitude, statusString)
                                             }
                                         }
-                                }
-                                override fun onError(exception: ImageCaptureException) {
-                                    Log.e("Trashpanzee", "Capture failed", exception)
-                                }
-                            }
-                        )
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF))
-                ) {
-                    Text("Map it!")
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = "Submit", tint = Color.White)
+                        }
+                    }
                 }
             }
         }
@@ -783,12 +1132,16 @@ data class TrashCan(
     val latitude: Double,
     val longitude: Double,
     var status: String,
-    val contributors: List<String>
+    val contributors: List<String>,
+    val upvotes: Int = 0,
+    val downvotes: Int = 0,
+    val upvotedUsers: List<String>? = emptyList(),
+    val downvotedUsers: List<String>? = emptyList()
 )
 
 class PinStorageManager(context: Context) {
-    // 🚀 Version bumped to v5 to clear old structural schemas and rebuild the simulation pins
-    private val prefs: SharedPreferences = context.getSharedPreferences("TrashpanzeeCans_v5", Context.MODE_PRIVATE)
+    // 🚀 Version bumped to v6 to include upvote/downvote fields and rebuild simulation pins
+    private val prefs: SharedPreferences = context.getSharedPreferences("TrashpanzeeCans_v7", Context.MODE_PRIVATE)
     private val gson = Gson()
 
     var userName: String?
